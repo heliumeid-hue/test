@@ -3,47 +3,66 @@ import pandas as pd
 import plotly.express as px
 from ntscraper import Nitter
 
-# 1. UI Setup
 st.set_page_config(page_title="KSA Defense Monitor", layout="wide")
-st.title("🛡️ Saudi Defense Official Monitor")
-st.markdown("---")
 
-# 2. Free Data Scraper
-@st.cache_data(ttl=3600) # Only refreshes once per hour to keep it fast
-def get_live_data():
+# --- 1. DATA COLLECTION ---
+@st.cache_data(ttl=300) # Refreshes every 5 minutes
+def fetch_data():
     try:
         scraper = Nitter()
-        # Pull last 20 tweets from @modgovksa
-        tweets = scraper.get_tweets("modgovksa", mode='user', number=20)
+        # We pull 50 tweets to make sure we don't miss anything
+        tweets = scraper.get_tweets("modgovksa", mode='user', number=50)
         
         results = []
         for t in tweets['tweets']:
-            text = t['text']
-            # Basic Categorization
-            kind = "Drone" if "مسيرة" in text or "drone" in text.lower() else "Missile"
-            loc = "Eastern Province" if "الشرقية" in text else "Riyadh" if "الرياض" in text else "Southern Border"
-            
-            results.append({
-                "Date": pd.to_datetime(t['date']).date(),
-                "Location": loc,
-                "Type": kind,
-                "Count": 1
-            })
+            txt = t['text']
+            # Improved detection: looks for any mention of drones/missiles/interception
+            if any(word in txt for word in ["اعتراض", "تدمير", "مسيرة", "صاروخ", "drone", "missile"]):
+                # Determine type
+                threat = "Drone" if ("مسيرة" in txt or "drone" in txt.lower()) else "Missile"
+                # Determine Location
+                loc = "Eastern Province" if "الشرقية" in txt else "Riyadh" if "الرياض" in txt else "Southern Border"
+                
+                results.append({
+                    "Date": pd.to_datetime(t['date']).date(),
+                    "Location": loc,
+                    "Type": threat,
+                    "Count": 1
+                })
         return pd.DataFrame(results)
     except:
-        # Fallback data if the scraper hits a snag
-        return pd.DataFrame([{"Date": "2026-03-18", "Location": "Sample Region", "Type": "Drone", "Count": 0}])
+        return pd.DataFrame()
 
-# 3. Display Data
-df = get_live_data()
-df['Date'] = pd.to_datetime(df['Date'])
-df = df.sort_values(by=['Date', 'Location'], ascending=[False, True])
+# --- 2. THE DASHBOARD ---
+st.title("🛡️ Saudi Defense Official Monitor")
+live_df = fetch_data()
 
-# Visuals
-fig = px.bar(df, x="Date", y="Count", color="Type", facet_col="Location", 
-             template="plotly_dark", color_discrete_map={"Drone": "#00CCFF", "Missile": "#1F3B4D"})
-st.plotly_chart(fig, use_container_width=True)
+# Manual Data entry (If the scraper is blocked or empty)
+st.sidebar.header("Manual Data Override")
+if st.sidebar.checkbox("Add Manual Data (If Live Feed is empty)"):
+    m_date = st.sidebar.date_input("Date")
+    m_loc = st.sidebar.selectbox("Location", ["Eastern Province", "Riyadh", "Southern Border", "Jazan"])
+    m_type = st.sidebar.radio("Type", ["Drone", "Missile"])
+    m_count = st.sidebar.number_input("Count", min_value=1, value=1)
+    
+    manual_df = pd.DataFrame([{"Date": m_date, "Location": m_loc, "Type": m_type, "Count": m_count}])
+    df = pd.concat([live_df, manual_df], ignore_index=True)
+else:
+    df = live_df
 
-# Table
-st.subheader("Official Log Feed")
-st.dataframe(df, use_container_width=True)
+# --- 3. DISPLAY ---
+if not df.empty:
+    df['Date'] = pd.to_datetime(df['Date'])
+    # SORTED BY DAY AND LOCATION
+    df = df.sort_values(by=['Date', 'Location'], ascending=[False, True])
+    
+    # Chart
+    fig = px.bar(df, x="Date", y="Count", color="Type", facet_col="Location",
+                 template="plotly_dark", barmode="group",
+                 color_discrete_map={"Drone": "#00CCFF", "Missile": "#1F3B4D"})
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Table
+    st.dataframe(df, use_container_width=True)
+else:
+    st.error("No data found in the last 50 tweets. Use the Sidebar to add data manually.")
