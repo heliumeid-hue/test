@@ -13,20 +13,12 @@ st.set_page_config(page_title="KSA Defense Monitor", layout="wide", page_icon="�
 # --- 1. GOOGLE SHEETS CONNECTION ---
 def connect_to_database():
     try:
-        # Load the secret JSON key from Streamlit Secrets
         creds_dict = json.loads(st.secrets["google_json"])
-        bot_email = creds_dict.get("client_email")
-        
-        # Authorize and open the sheet
         gc = gspread.service_account_from_dict(creds_dict)
         sh = gc.open("KSA_Defense_Data")
         return sh.sheet1
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"❌ Spreadsheet 'KSA_Defense_Data' not found! Make sure it is named exactly that and shared with: {bot_email}")
-        st.stop()
     except Exception as e:
         st.error(f"❌ Database Connection Error: {e}")
-        st.info("Check if Google Sheets API and Google Drive API are both ENABLED in Google Cloud Console.")
         st.stop()
 
 # --- 2. HYBRID DATABASE ENGINE ---
@@ -34,12 +26,20 @@ def connect_to_database():
 def load_and_update_data():
     worksheet = connect_to_database()
     
-    # 1. Pull existing data
-    existing_data = worksheet.get_all_records()
-    df = pd.DataFrame(existing_data)
+    # 1. Pull all existing data safely
+    try:
+        existing_data = worksheet.get_all_records()
+        df = pd.DataFrame(existing_data)
+    except:
+        # If the sheet is brand new/empty, get_all_records fails
+        df = pd.DataFrame()
     
-    # 2. IF SHEET IS EMPTY: Inject the 487 Total Historical Baseline
-    if df.empty:
+    # 2. IF SHEET IS EMPTY OR HEADERS MISSING: Inject the 487 Total Baseline
+    if df.empty or "Date" not in df.columns:
+        st.info("Initializing Database for the first time...")
+        # Clear anything in the sheet and start fresh with headers
+        worksheet.clear()
+        headers = ["Date", "Location", "Type", "Count"]
         baseline_data = [
             ["2026-03-02", "Unspecified", "Unspecified", 7],
             ["2026-03-03", "Unspecified", "Unspecified", 10],
@@ -67,18 +67,21 @@ def load_and_update_data():
             ["2026-03-17", "Eastern Region", "Drone", 24],
             ["2026-03-17", "Unspecified", "Unspecified", 21],
         ]
+        worksheet.update('A1', [headers])
         worksheet.append_rows(baseline_data)
+        
+        # Reload after initialization
         existing_data = worksheet.get_all_records()
         df = pd.DataFrame(existing_data)
 
+    # Standardize data
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     latest_date_in_db = df['Date'].max()
 
-    # 3. LIVE SCRAPER: Bridge the gap from last save to Today
+    # 3. LIVE SCRAPER: Bridge from database end to today
     new_records_to_save = []
     try:
         scraper = Nitter()
-        # Increased number to 100 to catch gaps if app is closed for days
         tweets = scraper.get_tweets("modgovksa", mode='user', number=100)
         translator = GoogleTranslator(source='ar', target='en')
         
@@ -115,8 +118,8 @@ def load_and_update_data():
     except:
         pass 
 
-    # 4. SAVE NEW FINDINGS TO GOOGLE SHEETS
-    if len(new_records_to_save) > 0:
+    # 4. Save to Sheets
+    if new_records_to_save:
         worksheet.append_rows(new_records_to_save)
         new_df = pd.DataFrame(new_records_to_save, columns=["Date", "Location", "Type", "Count"])
         new_df['Date'] = pd.to_datetime(new_df['Date']).dt.date
@@ -124,71 +127,42 @@ def load_and_update_data():
         
     return df
 
-# --- 3. LOAD DATA ---
+# --- 3. UI LOGIC ---
 df = load_and_update_data()
 
-# --- 4. SIDEBAR FILTERS ---
 st.sidebar.header("⚙️ Dashboard Controls")
-
-min_date = date(2026, 3, 2) 
+min_date = date(2026, 3, 2)
 max_date = date.today()
+date_sel = st.sidebar.date_input("Date Range", [min_date, max_date])
 
-# Date picker with safeguard
-date_sel = st.sidebar.date_input("Select Date Range", [min_date, max_date], min_value=min_date, max_value=max_date)
-if isinstance(date_sel, list) or isinstance(date_sel, tuple):
-    start_date = date_sel[0]
-    end_date = date_sel[1] if len(date_sel) > 1 else start_date
+# Filter logic
+if isinstance(date_sel, list) and len(date_sel) == 2:
+    start_d, end_d = date_sel
 else:
-    start_date = end_date = date_sel
+    start_d = end_d = (date_sel[0] if isinstance(date_sel, list) else date_sel)
 
-all_locations = df['Location'].unique().tolist()
-selected_locs = st.sidebar.multiselect("Filter by Area", all_locations, default=all_locations)
+mask = (df['Date'] >= start_d) & (df['Date'] <= end_d)
+f_df = df[mask]
 
-all_types = df['Type'].unique().tolist()
-selected_types = st.sidebar.multiselect("Filter by Threat Type", all_types, default=all_types)
-
-# --- 5. APPLY FILTERS ---
-mask = (
-    (df['Date'] >= start_date) & 
-    (df['Date'] <= end_date) & 
-    (df['Location'].isin(selected_locs)) &
-    (df['Type'].isin(selected_types))
-)
-filtered_df = df[mask]
-
-# --- 6. DASHBOARD UI ---
+# --- 4. DISPLAY ---
 st.title("🛡️ KSA Regional Defense Monitor")
+total = f_df['Count'].sum()
 
-if filtered_df.empty:
-    st.warning("No data found for the selected filters.")
-else:
-    # Grand Total KPI
-    grand_total = filtered_df['Count'].sum()
-    st.markdown(f"""
-        <div style="background-color:#1F3B4D; padding:20px; border-radius:10px; text-align:center; margin-bottom:20px;">
-            <h2 style="margin:0; color:white;">Total Interceptions (Database + Live)</h2>
-            <h1 style="margin:0; color:#00CCFF; font-size: 3.5rem;">{grand_total}</h1>
-        </div>
-    """, unsafe_allow_html=True)
+st.markdown(f"""
+    <div style="background-color:#1F3B4D; padding:20px; border-radius:10px; text-align:center; margin-bottom:20px;">
+        <h2 style="margin:0; color:white;">Total Interceptions (Verified Database)</h2>
+        <h1 style="margin:0; color:#00CCFF; font-size: 3.5rem;">{total}</h1>
+    </div>
+""", unsafe_allow_html=True)
 
-    col1, col2 = st.columns(2)
-    color_map = {"Drone": "#00CCFF", "Missile": "#FF4B4B", "Unspecified": "#4A6274"}
-    
-    with col1:
-        area_totals = filtered_df.groupby(['Location', 'Type'])['Count'].sum().reset_index()
-        fig_area = px.bar(area_totals, x="Location", y="Count", color="Type", 
-                          title="Interceptions by Geography", text="Count",
-                          template="plotly_dark", color_discrete_map=color_map)
-        fig_area.update_traces(textposition='outside')
-        st.plotly_chart(fig_area, use_container_width=True)
+c1, c2 = st.columns(2)
+cmap = {"Drone": "#00CCFF", "Missile": "#FF4B4B", "Unspecified": "#4A6274"}
 
-    with col2:
-        timeline_totals = filtered_df.groupby(['Date', 'Type'])['Count'].sum().reset_index()
-        fig_time = px.bar(timeline_totals, x="Date", y="Count", color="Type",
-                          title="Daily Threat Volume",
-                          template="plotly_dark", color_discrete_map=color_map)
-        st.plotly_chart(fig_time, use_container_width=True)
+with c1:
+    st.plotly_chart(px.bar(f_df.groupby(['Location', 'Type'])['Count'].sum().reset_index(), 
+                    x="Location", y="Count", color="Type", template="plotly_dark", color_discrete_map=cmap), use_container_width=True)
+with c2:
+    st.plotly_chart(px.bar(f_df.groupby(['Date', 'Type'])['Count'].sum().reset_index(), 
+                    x="Date", y="Count", color="Type", template="plotly_dark", color_discrete_map=cmap), use_container_width=True)
 
-    st.subheader("📝 Database Record Logs")
-    clean_table = filtered_df.sort_values(by=['Date'], ascending=False).reset_index(drop=True)
-    st.dataframe(clean_table, use_container_width=True)
+st.dataframe(f_df.sort_values(by='Date', ascending=False), use_container_width=True)
