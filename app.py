@@ -12,7 +12,6 @@ st.set_page_config(page_title="KSA Defense Monitor", layout="wide", page_icon="�
 @st.cache_data(ttl=300)
 def load_and_merge_data():
     # 1. Base Historical Data (March 1 - March 17)
-    # This guarantees your dashboard always has perfect totals even if X is blocking scrapers today.
     historical_data = [
         {"Date": "2026-03-17", "Location": "Eastern Region", "Type": "Drone", "Count": 24},
         {"Date": "2026-03-16", "Location": "Eastern Region", "Type": "Drone", "Count": 36},
@@ -27,7 +26,7 @@ def load_and_merge_data():
     df_history = pd.DataFrame(historical_data)
     df_history['Date'] = pd.to_datetime(df_history['Date']).dt.date
     
-    # 2. Live Scraper for Today's Data (March 18 onwards)
+    # 2. Live Scraper for Today's Data
     live_results = []
     try:
         scraper = Nitter()
@@ -38,7 +37,6 @@ def load_and_merge_data():
             for t in tweets['tweets']:
                 tweet_date = pd.to_datetime(t['date']).date()
                 
-                # Only process if the tweet is from today or yesterday to avoid duplicating history
                 if tweet_date >= date(2026, 3, 17): 
                     orig_txt = t['text']
                     try:
@@ -47,7 +45,6 @@ def load_and_merge_data():
                         eng_txt = orig_txt.lower()
                     
                     if any(word in eng_txt for word in ["intercept", "destroy", "shoot down"]):
-                        # Extract Numbers
                         drone_match = re.search(r'(\d+)\s*(?:drone|uav)', eng_txt)
                         missile_match = re.search(r'(\d+)\s*(?:missile|ballistic)', eng_txt)
                         
@@ -57,8 +54,7 @@ def load_and_merge_data():
                         elif "drone" in eng_txt or "uav" in eng_txt: threat = "Drone"
                         elif "missile" in eng_txt: threat = "Missile"
                         
-                        # Extract Location (Using English translations as requested)
-                        loc = "Unspecified" # Leaves it blank/unspecified if not mentioned
+                        loc = "Unspecified"
                         if "eastern" in eng_txt: loc = "Eastern Region"
                         elif "riyadh" in eng_txt: loc = "Riyadh"
                         elif "jazan" in eng_txt: loc = "Jazan"
@@ -69,9 +65,8 @@ def load_and_merge_data():
                         if threat != "Unknown":
                             live_results.append({"Date": tweet_date, "Location": loc, "Type": threat, "Count": count})
     except:
-        pass # If scraper fails, we just rely on historical data silently
+        pass 
 
-    # Merge History and Live Data, then drop exact duplicates
     if live_results:
         df_live = pd.DataFrame(live_results)
         df_combined = pd.concat([df_history, df_live]).drop_duplicates(subset=['Date', 'Location', 'Type', 'Count'])
@@ -87,16 +82,19 @@ df = load_and_merge_data()
 st.sidebar.header("⚙️ Dashboard Controls")
 st.sidebar.markdown("Use these filters to adjust all charts and totals below.")
 
-# Date Filter (Defaults to March 1st to Today)
 min_date = date(2026, 3, 1)
 max_date = date.today()
-start_date, end_date = st.sidebar.date_input("Select Date Range", [min_date, max_date], min_value=date(2026, 1, 1), max_value=max_date)
 
-# Location Filter
+# Safeguard added here for the Date Picker!
+date_selection = st.sidebar.date_input("Select Date Range", [min_date, max_date], min_value=date(2026, 1, 1), max_value=max_date)
+if len(date_selection) == 2:
+    start_date, end_date = date_selection
+else:
+    start_date = end_date = date_selection[0]
+
 all_locations = df['Location'].unique().tolist()
 selected_locs = st.sidebar.multiselect("Filter by Area", all_locations, default=all_locations)
 
-# Type Filter
 all_types = df['Type'].unique().tolist()
 selected_types = st.sidebar.multiselect("Filter by Threat Type", all_types, default=all_types)
 
@@ -116,18 +114,17 @@ st.caption("Aggregating official reports. Translation-engine active.")
 if filtered_df.empty:
     st.warning("No data found for the selected filters.")
 else:
-    # Grand Total KPI
+    # Grand Total KPI (Fixed the unsafe_allow_html typo here!)
     grand_total = filtered_df['Count'].sum()
     st.markdown(f"""
         <div style="background-color:#1F3B4D; padding:20px; border-radius:10px; text-align:center; margin-bottom:20px;">
-            <h2 style="margin:0; color:white;">Total Interceptions (March 1 - Today)</h2>
+            <h2 style="margin:0; color:white;">Total Interceptions (Filtered)</h2>
             <h1 style="margin:0; color:#00CCFF; font-size: 3rem;">{grand_total}</h1>
         </div>
-    """, unsafe_import_html=True)
+    """, unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
     
-    # Chart 1: Total by Area (Bar Chart)
     with col1:
         area_totals = filtered_df.groupby(['Location', 'Type'])['Count'].sum().reset_index()
         fig_area = px.bar(area_totals, x="Location", y="Count", color="Type", 
@@ -136,7 +133,6 @@ else:
         fig_area.update_traces(textposition='outside')
         st.plotly_chart(fig_area, use_container_width=True)
 
-    # Chart 2: Timeline of Events
     with col2:
         timeline_totals = filtered_df.groupby(['Date', 'Type'])['Count'].sum().reset_index()
         fig_time = px.bar(timeline_totals, x="Date", y="Count", color="Type",
@@ -144,9 +140,7 @@ else:
                           template="plotly_dark", color_discrete_map={"Drone": "#00CCFF", "Missile": "#FF4B4B"})
         st.plotly_chart(fig_time, use_container_width=True)
 
-    # Data Table
     st.subheader("Filtered Data Logs")
-    # Group by exact Date and Location to clean up the table view
     clean_table = filtered_df.groupby(['Date', 'Location', 'Type'])['Count'].sum().reset_index()
     clean_table = clean_table.sort_values(by=['Date'], ascending=False).reset_index(drop=True)
     st.dataframe(clean_table, use_container_width=True)
