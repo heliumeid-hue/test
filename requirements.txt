@@ -3,3 +3,4 @@ pandas
 plotly
 ntscraper
 deep-translator
+gspread
