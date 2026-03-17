@@ -5,71 +5,84 @@ from ntscraper import Nitter
 import re
 from deep_translator import GoogleTranslator
 from datetime import date
+import gspread
+import json
 
 st.set_page_config(page_title="KSA Defense Monitor", layout="wide", page_icon="🛡️")
 
-# --- 1. HYBRID DATA ENGINE ---
-@st.cache_data(ttl=300)
-def load_and_merge_data():
-    # 1. Base Historical Data: Merging known OSINT logs with the Horizon Line Chart totals
-    historical_data = [
-        {"Date": "2026-03-02", "Location": "Unspecified", "Type": "Unspecified", "Count": 7},
-        {"Date": "2026-03-03", "Location": "Unspecified", "Type": "Unspecified", "Count": 10},
-        
-        # March 4: Chart total = 13. (3 Known + 10 Unspecified)
-        {"Date": "2026-03-04", "Location": "Al-Kharj", "Type": "Missile", "Count": 2},
-        {"Date": "2026-03-04", "Location": "Eastern Region", "Type": "Drone", "Count": 1},
-        {"Date": "2026-03-04", "Location": "Unspecified", "Type": "Unspecified", "Count": 10},
-        
-        {"Date": "2026-03-05", "Location": "Unspecified", "Type": "Unspecified", "Count": 7},
-        
-        # March 6: Chart total = 11. (3 Known + 8 Unspecified)
-        {"Date": "2026-03-06", "Location": "Al-Kharj", "Type": "Missile", "Count": 3},
-        {"Date": "2026-03-06", "Location": "Unspecified", "Type": "Unspecified", "Count": 8},
-        
-        {"Date": "2026-03-07", "Location": "Unspecified", "Type": "Unspecified", "Count": 28},
-        {"Date": "2026-03-08", "Location": "Unspecified", "Type": "Unspecified", "Count": 35},
-        {"Date": "2026-03-09", "Location": "Unspecified", "Type": "Unspecified", "Count": 25},
-        {"Date": "2026-03-10", "Location": "Unspecified", "Type": "Unspecified", "Count": 8},
-        {"Date": "2026-03-11", "Location": "Unspecified", "Type": "Unspecified", "Count": 30},
-        {"Date": "2026-03-12", "Location": "Unspecified", "Type": "Unspecified", "Count": 50},
-        
-        # March 13: Chart total = 66. (7 Known + 59 Unspecified)
-        {"Date": "2026-03-13", "Location": "Eastern Region", "Type": "Drone", "Count": 7},
-        {"Date": "2026-03-13", "Location": "Unspecified", "Type": "Unspecified", "Count": 59},
-        
-        {"Date": "2026-03-14", "Location": "Unspecified", "Type": "Unspecified", "Count": 23},
-        
-        # March 15: Chart total = 31. (14 Known + 17 Unspecified)
-        {"Date": "2026-03-15", "Location": "Riyadh", "Type": "Drone", "Count": 10},
-        {"Date": "2026-03-15", "Location": "Eastern Region", "Type": "Drone", "Count": 4},
-        {"Date": "2026-03-15", "Location": "Unspecified", "Type": "Unspecified", "Count": 17},
-        
-        # March 16: Chart total = 98. (70 Known + 28 Unspecified)
-        {"Date": "2026-03-16", "Location": "Eastern Region", "Type": "Drone", "Count": 36},
-        {"Date": "2026-03-16", "Location": "Riyadh", "Type": "Drone", "Count": 34},
-        {"Date": "2026-03-16", "Location": "Unspecified", "Type": "Unspecified", "Count": 28},
-        
-        # March 17: Chart total = 45. (24 Known + 21 Unspecified)
-        {"Date": "2026-03-17", "Location": "Eastern Region", "Type": "Drone", "Count": 24},
-        {"Date": "2026-03-17", "Location": "Unspecified", "Type": "Unspecified", "Count": 21},
-    ]
-    df_history = pd.DataFrame(historical_data)
-    df_history['Date'] = pd.to_datetime(df_history['Date']).dt.date
+# --- 1. GOOGLE SHEETS CONNECTION ---
+def connect_to_database():
+    # Load the secret JSON key you pasted into Streamlit
+    creds_dict = json.loads(st.secrets["google_json"])
+    gc = gspread.service_account_from_dict(creds_dict)
+    # Open our specific spreadsheet
+    sh = gc.open("KSA_Defense_Data")
+    return sh.sheet1
+
+# --- 2. HYBRID DATABASE ENGINE ---
+@st.cache_data(ttl=300) # Still checks for new live updates every 5 mins
+def load_and_update_data():
+    worksheet = connect_to_database()
     
-    # 2. Live Scraper for Today's Data (March 18 onwards)
-    live_results = []
+    # 1. Pull all existing data from the Google Sheet
+    existing_data = worksheet.get_all_records()
+    df = pd.DataFrame(existing_data)
+    
+    # 2. IF SHEET IS EMPTY: Inject the Historical Baseline
+    if df.empty:
+        baseline_data = [
+            ["2026-03-02", "Unspecified", "Unspecified", 7],
+            ["2026-03-03", "Unspecified", "Unspecified", 10],
+            ["2026-03-04", "Al-Kharj", "Missile", 2],
+            ["2026-03-04", "Eastern Region", "Drone", 1],
+            ["2026-03-04", "Unspecified", "Unspecified", 10],
+            ["2026-03-05", "Unspecified", "Unspecified", 7],
+            ["2026-03-06", "Al-Kharj", "Missile", 3],
+            ["2026-03-06", "Unspecified", "Unspecified", 8],
+            ["2026-03-07", "Unspecified", "Unspecified", 28],
+            ["2026-03-08", "Unspecified", "Unspecified", 35],
+            ["2026-03-09", "Unspecified", "Unspecified", 25],
+            ["2026-03-10", "Unspecified", "Unspecified", 8],
+            ["2026-03-11", "Unspecified", "Unspecified", 30],
+            ["2026-03-12", "Unspecified", "Unspecified", 50],
+            ["2026-03-13", "Eastern Region", "Drone", 7],
+            ["2026-03-13", "Unspecified", "Unspecified", 59],
+            ["2026-03-14", "Unspecified", "Unspecified", 23],
+            ["2026-03-15", "Riyadh", "Drone", 10],
+            ["2026-03-15", "Eastern Region", "Drone", 4],
+            ["2026-03-15", "Unspecified", "Unspecified", 17],
+            ["2026-03-16", "Eastern Region", "Drone", 36],
+            ["2026-03-16", "Riyadh", "Drone", 34],
+            ["2026-03-16", "Unspecified", "Unspecified", 28],
+            ["2026-03-17", "Eastern Region", "Drone", 24],
+            ["2026-03-17", "Unspecified", "Unspecified", 21],
+        ]
+        # Write the entire baseline to Google Sheets instantly
+        worksheet.append_rows(baseline_data)
+        
+        # Reload the dataframe now that it has data
+        existing_data = worksheet.get_all_records()
+        df = pd.DataFrame(existing_data)
+
+    # Ensure Date column is formatted correctly
+    df['Date'] = pd.to_datetime(df['Date']).dt.date
+    
+    # Find the most recent date we have in the database
+    latest_date_in_db = df['Date'].max()
+
+    # 3. LIVE SCRAPER: Only look for tweets NEWER than our database
+    new_records_to_save = []
     try:
         scraper = Nitter()
-        tweets = scraper.get_tweets("modgovksa", mode='user', number=20)
+        tweets = scraper.get_tweets("modgovksa", mode='user', number=100)
         translator = GoogleTranslator(source='ar', target='en')
         
         if tweets.get('tweets'):
             for t in tweets['tweets']:
                 tweet_date = pd.to_datetime(t['date']).date()
                 
-                # Only process new tweets
-                if tweet_date > date(2026, 3, 17): 
+                # The Golden Rule: Only process if it's newer than our database memory
+                if tweet_date > latest_date_in_db: 
                     orig_txt = t['text']
                     try:
                         eng_txt = translator.translate(orig_txt).lower()
@@ -94,22 +107,27 @@ def load_and_merge_data():
                         elif "kharj" in eng_txt: loc = "Al-Kharj"
                         elif "southern" in eng_txt or "khamis" in eng_txt: loc = "Southern Region"
                         
-                        live_results.append({"Date": tweet_date, "Location": loc, "Type": threat, "Count": count})
+                        # Prepare the row for Google Sheets (Dates must be strings for Sheets)
+                        new_records_to_save.append([str(tweet_date), loc, threat, count])
     except:
         pass 
 
-    if live_results:
-        df_live = pd.DataFrame(live_results)
-        df_combined = pd.concat([df_history, df_live]).drop_duplicates(subset=['Date', 'Location', 'Type', 'Count'])
-    else:
-        df_combined = df_history
+    # 4. WRITE NEW DATA TO GOOGLE SHEETS
+    if len(new_records_to_save) > 0:
+        # Save to Google Sheets forever
+        worksheet.append_rows(new_records_to_save)
         
-    return df_combined
+        # Add the new rows to our current dashboard view
+        new_df = pd.DataFrame(new_records_to_save, columns=["Date", "Location", "Type", "Count"])
+        new_df['Date'] = pd.to_datetime(new_df['Date']).dt.date
+        df = pd.concat([df, new_df]).drop_duplicates(subset=['Date', 'Location', 'Type', 'Count'])
+        
+    return df
 
-# --- 2. LOAD DATA ---
-df = load_and_merge_data()
+# --- 3. LOAD DATA ---
+df = load_and_update_data()
 
-# --- 3. SIDEBAR FILTERS ---
+# --- 4. SIDEBAR FILTERS ---
 st.sidebar.header("⚙️ Dashboard Controls")
 
 min_date = date(2026, 3, 2) 
@@ -127,7 +145,7 @@ selected_locs = st.sidebar.multiselect("Filter by Area", all_locations, default=
 all_types = df['Type'].unique().tolist()
 selected_types = st.sidebar.multiselect("Filter by Threat Type", all_types, default=all_types)
 
-# --- 4. APPLY FILTERS ---
+# --- 5. APPLY FILTERS ---
 mask = (
     (df['Date'] >= start_date) & 
     (df['Date'] <= end_date) & 
@@ -136,7 +154,7 @@ mask = (
 )
 filtered_df = df[mask]
 
-# --- 5. DASHBOARD UI ---
+# --- 6. DASHBOARD UI ---
 st.title("🛡️ KSA Regional Defense Monitor")
 
 if filtered_df.empty:
@@ -153,7 +171,6 @@ else:
 
     col1, col2 = st.columns(2)
     
-    # Kept your color map for clean visualization
     color_map = {"Drone": "#00CCFF", "Missile": "#FF4B4B", "Unspecified": "#4A6274"}
     
     with col1:
@@ -171,7 +188,7 @@ else:
                           template="plotly_dark", color_discrete_map=color_map)
         st.plotly_chart(fig_time, use_container_width=True)
 
-    st.subheader("Data Logs")
+    st.subheader("Database Logs (Live from Google Sheets)")
     clean_table = filtered_df.groupby(['Date', 'Location', 'Type'])['Count'].sum().reset_index()
     clean_table = clean_table.sort_values(by=['Date'], ascending=False).reset_index(drop=True)
     st.dataframe(clean_table, use_container_width=True)
