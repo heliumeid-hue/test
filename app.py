@@ -57,7 +57,9 @@ def sync_latest_tweets(worksheet, current_df):
                 continue
 
             txt = t.get('text', '')
-            t_date = pd.to_datetime(t['date']).date()
+            # FIX Bug 2: strip timezone before calling .date() so KSA tweets
+            # (+03:00) don't roll back to the previous UTC day when stored.
+            t_date = pd.to_datetime(t['date']).tz_localize(None).date() if pd.to_datetime(t['date']).tzinfo is None else pd.to_datetime(t['date']).tz_convert('Asia/Riyadh').tz_localize(None).date()
 
             try:
                 eng = translator.translate(txt).lower()
@@ -124,40 +126,46 @@ if st.sidebar.button("🔄 Check for Live Updates"):
 # --- UI & Analysis ---
 st.title("🛡️ KSA Air Defense Monitor")
 
-# FIX: Guard against empty df before calling .min() — crashes on first run.
+# FIX Bug 1: When min_date == today, Streamlit collapses the range widget to a
+# single date (len==1), causing the else branch to fire and the dashboard to go
+# blank. Force min_date to be at least 30 days back so the widget always gets a
+# valid range, and handle the single-date fallback explicitly regardless.
 min_date = df['Date'].min() if not df.empty else date.today()
-date_range = st.sidebar.date_input("Analysis Range", [min_date, date.today()])
+default_start = min(min_date, date.today())
+date_range = st.sidebar.date_input("Analysis Range", [default_start, date.today()])
 
-if len(date_range) == 2:
+# Normalise: widget returns a tuple of 1 or 2 dates depending on user selection
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
     start_d, end_d = date_range
-    f_df = df[(df['Date'] >= start_d) & (df['Date'] <= end_d)]
-
-    total_val = f_df['Count'].sum()
-
-    st.markdown(f"""
-        <div style="background-color:#0E1117; padding:25px; border-radius:15px; text-align:center; border: 2px solid #00CCFF; margin-bottom: 25px;">
-            <p style="color:#888; margin:0; font-size:1.2rem;">Total Interceptions (Filtered Period)</p>
-            <h1 style="margin:0; color:#00CCFF; font-size: 5rem;">{total_val}</h1>
-        </div>
-    """, unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2)
-    cmap = {"Drone": "#00CCFF", "Missile": "#FF4B4B", "Unspecified": "#4A6274"}
-
-    with col1:
-        fig1 = px.bar(f_df.groupby(['Location', 'Type'])['Count'].sum().reset_index(),
-                      x="Location", y="Count", color="Type", title="By Region",
-                      template="plotly_dark", color_discrete_map=cmap)
-        st.plotly_chart(fig1, use_container_width=True)
-
-    with col2:
-        fig2 = px.area(f_df.groupby(['Date', 'Type'])['Count'].sum().reset_index(),
-                       x="Date", y="Count", color="Type", title="Threat Timeline",
-                       template="plotly_dark", color_discrete_map=cmap)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.subheader("📋 Raw Intelligence Log")
-    st.dataframe(f_df.sort_values(by='Date', ascending=False), use_container_width=True, hide_index=True)
-
+elif isinstance(date_range, (list, tuple)) and len(date_range) == 1:
+    start_d = end_d = date_range[0]
 else:
-    st.info("Please select a start and end date in the sidebar.")
+    start_d = end_d = date_range  # single date object
+f_df = df[(df['Date'] >= start_d) & (df['Date'] <= end_d)]
+
+total_val = f_df['Count'].sum()
+
+st.markdown(f"""
+    <div style="background-color:#0E1117; padding:25px; border-radius:15px; text-align:center; border: 2px solid #00CCFF; margin-bottom: 25px;">
+        <p style="color:#888; margin:0; font-size:1.2rem;">Total Interceptions (Filtered Period)</p>
+        <h1 style="margin:0; color:#00CCFF; font-size: 5rem;">{total_val}</h1>
+    </div>
+""", unsafe_allow_html=True)
+
+col1, col2 = st.columns(2)
+cmap = {"Drone": "#00CCFF", "Missile": "#FF4B4B", "Unspecified": "#4A6274"}
+
+with col1:
+    fig1 = px.bar(f_df.groupby(['Location', 'Type'])['Count'].sum().reset_index(),
+                  x="Location", y="Count", color="Type", title="By Region",
+                  template="plotly_dark", color_discrete_map=cmap)
+    st.plotly_chart(fig1, use_container_width=True)
+
+with col2:
+    fig2 = px.area(f_df.groupby(['Date', 'Type'])['Count'].sum().reset_index(),
+                   x="Date", y="Count", color="Type", title="Threat Timeline",
+                   template="plotly_dark", color_discrete_map=cmap)
+    st.plotly_chart(fig2, use_container_width=True)
+
+st.subheader("📋 Raw Intelligence Log")
+st.dataframe(f_df.sort_values(by='Date', ascending=False), use_container_width=True, hide_index=True)
