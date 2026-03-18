@@ -1,6 +1,6 @@
+streamlit
+pandas
+plotly
 requests
 beautifulsoup4
 gspread
-plotly
-pandas
-streamlit
