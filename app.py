@@ -1,12 +1,22 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from ntscraper import Nitter
+import feedparser
+import requests
 import re
 from deep_translator import GoogleTranslator
 from datetime import date
 import gspread
 import json
+
+# Nitter RSS instances to try in order — first live one wins.
+# Add/remove as instances come and go.
+NITTER_INSTANCES = [
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.lunar.icu",
+    "https://nitter.unixfox.eu",
+]
 
 st.set_page_config(page_title="KSA Defense Monitor", layout="wide", page_icon="🛡️")
 
@@ -35,69 +45,88 @@ def ensure_headers(worksheet):
     except Exception:
         pass
 
-# --- 3. Data Synchronization ---
-def sync_latest_tweets(worksheet, current_df):
-    """Checks for new tweets and updates the Google Sheet safely."""
-    new_rows = []
-    translator = GoogleTranslator(source='ar', target='en')
+# --- 3. RSS Feed Fetcher ---
+def fetch_rss_feed(username: str) -> list:
+    """Try each Nitter instance in order, return parsed RSS entries from the first live one."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; KSA-Monitor/1.0)"}
+    for base in NITTER_INSTANCES:
+        url = f"{base}/{username}/rss"
+        try:
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code == 200 and "<rss" in resp.text:
+                feed = feedparser.parse(resp.text)
+                if feed.entries:
+                    return feed.entries
+        except Exception:
+            continue
+    return []  # all instances failed
 
-    try:
-        scraper = Nitter(log_level=1, skip_instance_check=False)
-        tweets_data = scraper.get_tweets("modgovksa", mode='user', number=20)
-    except Exception as e:
-        st.sidebar.warning(f"Scraper unavailable: {e}")
+
+# --- 4. Data Synchronization ---
+def sync_latest_tweets(worksheet, current_df):
+    """Fetch RSS, detect threat keywords, append new rows to the sheet."""
+    translator = GoogleTranslator(source='ar', target='en')
+    entries = fetch_rss_feed("modgovksa")
+
+    if not entries:
+        st.sidebar.warning("All Nitter RSS instances are currently unavailable. Try again later.")
         return False
 
-    try:
-        existing_ids = set(current_df['ID'].astype(str)) if not current_df.empty else set()
+    new_rows = []
+    existing_ids = set(current_df['ID'].astype(str)) if not current_df.empty else set()
 
-        for t in tweets_data.get('tweets', []):
-            t_id = str(t.get('link', '').split('/')[-1])
-            if not t_id or t_id in existing_ids:
-                continue
+    for entry in entries:
+        # Unique ID: last segment of the tweet URL
+        link = entry.get("link", "")
+        t_id = link.split("/")[-1].split("#")[0]
+        if not t_id or t_id in existing_ids:
+            continue
 
-            txt = t.get('text', '')
-            # FIX Bug 2: strip timezone before calling .date() so KSA tweets
-            # (+03:00) don't roll back to the previous UTC day when stored.
-            t_date = pd.to_datetime(t['date']).tz_localize(None).date() if pd.to_datetime(t['date']).tzinfo is None else pd.to_datetime(t['date']).tz_convert('Asia/Riyadh').tz_localize(None).date()
+        txt = entry.get("summary", entry.get("title", ""))
+        # Strip HTML tags that appear in RSS summaries
+        txt = re.sub(r"<[^>]+>", " ", txt).strip()
 
-            try:
-                eng = translator.translate(txt).lower()
-            except Exception:
-                eng = txt.lower()
+        # Timezone-safe date: convert to Asia/Riyadh before stripping tz
+        try:
+            raw_dt = pd.to_datetime(entry.get("published", ""))
+            if raw_dt.tzinfo is not None:
+                t_date = raw_dt.tz_convert("Asia/Riyadh").tz_localize(None).date()
+            else:
+                t_date = raw_dt.date()
+        except Exception:
+            t_date = date.today()
 
-            keywords = ["intercept", "destroy", "shoot down", "drone", "uav", "missile"]
-            if any(w in eng for w in keywords):
-                d_m = re.search(r'(\d+)\s*(?:drone|uav)', eng)
-                m_m = re.search(r'(\d+)\s*(?:missile|ballistic)', eng)
+        try:
+            eng = translator.translate(txt).lower()
+        except Exception:
+            eng = txt.lower()
 
-                val = 1
-                if d_m:
-                    val = int(d_m.group(1))
-                elif m_m:
-                    val = int(m_m.group(1))
+        keywords = ["intercept", "destroy", "shoot down", "drone", "uav", "missile"]
+        if not any(w in eng for w in keywords):
+            continue
 
-                threat = "Drone" if "drone" in eng or "uav" in eng else "Missile"
+        d_m = re.search(r'(\d+)\s*(?:drone|uav)', eng)
+        m_m = re.search(r'(\d+)\s*(?:missile|ballistic)', eng)
+        val = int(d_m.group(1)) if d_m else int(m_m.group(1)) if m_m else 1
 
-                loc = "Unspecified"
-                for l in ["eastern", "riyadh", "jazan", "najran", "southern", "kharj"]:
-                    if l in eng:
-                        loc = l.capitalize() + " Region"
-                        break
+        threat = "Drone" if "drone" in eng or "uav" in eng else "Missile"
 
-                new_rows.append([str(t_date), loc, threat, val, t_id])
+        loc = "Unspecified"
+        for l in ["eastern", "riyadh", "jazan", "najran", "southern", "kharj"]:
+            if l in eng:
+                loc = l.capitalize() + " Region"
+                break
 
-        if new_rows:
-            worksheet.append_rows(new_rows)
-            st.toast(f"Added {len(new_rows)} new interception records!", icon="🚀")
-            return True
+        new_rows.append([str(t_date), loc, threat, val, t_id])
 
-    except Exception as e:
-        st.sidebar.warning(f"Sync issue: {e}")
+    if new_rows:
+        worksheet.append_rows(new_rows)
+        st.toast(f"Added {len(new_rows)} new interception records!", icon="🚀")
+        return True
 
     return False
 
-# --- 4. Optimized Data Loader ---
+# --- 5. Optimized Data Loader ---
 # FIX: load_data now only reads data — no writes, no connection creation.
 # The worksheet is passed in from the cached resource, not created here.
 @st.cache_data(ttl=300)
@@ -111,7 +140,7 @@ def load_data(_worksheet):
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
 
-# --- 5. Main Execution ---
+# --- 6. Main Execution ---
 # FIX: Single call to get_worksheet() via the cached resource.
 worksheet = get_worksheet()
 ensure_headers(worksheet)
