@@ -1,22 +1,17 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import feedparser
 import requests
 import re
 from deep_translator import GoogleTranslator
-from datetime import date
+from datetime import date, timezone
 import gspread
 import json
 
-# Nitter RSS instances to try in order — first live one wins.
-# Add/remove as instances come and go.
-NITTER_INSTANCES = [
-    "https://nitter.poast.org",
-    "https://nitter.privacydev.net",
-    "https://nitter.lunar.icu",
-    "https://nitter.unixfox.eu",
-]
+# X API v2 — Bearer Token stored in Streamlit secrets as [twitter] bearer_token
+X_API_URL    = "https://api.twitter.com/2/users/{uid}/tweets"
+X_LOOKUP_URL = "https://api.twitter.com/2/users/by/username/{username}"
+MOD_USERNAME = "modgovksa"
 
 st.set_page_config(page_title="KSA Defense Monitor", layout="wide", page_icon="🛡️")
 
@@ -45,54 +40,72 @@ def ensure_headers(worksheet):
     except Exception:
         pass
 
-# --- 3. RSS Feed Fetcher ---
-def fetch_rss_feed(username: str) -> list:
-    """Try each Nitter instance in order, return parsed RSS entries from the first live one."""
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; KSA-Monitor/1.0)"}
-    for base in NITTER_INSTANCES:
-        url = f"{base}/{username}/rss"
-        try:
-            resp = requests.get(url, headers=headers, timeout=8)
-            if resp.status_code == 200 and "<rss" in resp.text:
-                feed = feedparser.parse(resp.text)
-                if feed.entries:
-                    return feed.entries
-        except Exception:
-            continue
-    return []  # all instances failed
+# --- 3. X API v2 Fetcher ---
+@st.cache_data(ttl=3600)  # Cache the user ID lookup for 1 hour — it never changes
+def get_user_id(username: str) -> str | None:
+    """Resolve @username → numeric user ID using the Bearer Token."""
+    token = st.secrets.get("twitter", {}).get("bearer_token", "")
+    if not token:
+        st.error("Missing [twitter] bearer_token in Streamlit secrets.")
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(
+        X_LOOKUP_URL.format(username=username),
+        headers=headers, timeout=10
+    )
+    if resp.status_code == 200:
+        return resp.json().get("data", {}).get("id")
+    st.sidebar.error(f"X API user lookup failed: {resp.status_code} — {resp.text[:120]}")
+    return None
+
+
+def fetch_x_tweets(user_id: str, max_results: int = 20) -> list:
+    """Fetch the latest tweets for a user ID via X API v2."""
+    token = st.secrets.get("twitter", {}).get("bearer_token", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "max_results": max_results,
+        "tweet.fields": "created_at,text",
+        "exclude": "retweets,replies",
+    }
+    resp = requests.get(
+        X_API_URL.format(uid=user_id),
+        headers=headers, params=params, timeout=10
+    )
+    if resp.status_code == 200:
+        return resp.json().get("data", [])
+    st.sidebar.error(f"X API fetch failed: {resp.status_code} — {resp.text[:120]}")
+    return []
 
 
 # --- 4. Data Synchronization ---
 def sync_latest_tweets(worksheet, current_df):
-    """Fetch RSS, detect threat keywords, append new rows to the sheet."""
+    """Fetch from X API v2, detect threats, append new rows to the sheet."""
     translator = GoogleTranslator(source='ar', target='en')
-    entries = fetch_rss_feed("modgovksa")
 
-    if not entries:
-        st.sidebar.warning("All Nitter RSS instances are currently unavailable. Try again later.")
+    user_id = get_user_id(MOD_USERNAME)
+    if not user_id:
+        return False
+
+    tweets = fetch_x_tweets(user_id)
+    if not tweets:
+        st.sidebar.warning("No tweets returned from X API.")
         return False
 
     new_rows = []
     existing_ids = set(current_df['ID'].astype(str)) if not current_df.empty else set()
 
-    for entry in entries:
-        # Unique ID: last segment of the tweet URL
-        link = entry.get("link", "")
-        t_id = link.split("/")[-1].split("#")[0]
+    for t in tweets:
+        t_id = str(t.get("id", ""))
         if not t_id or t_id in existing_ids:
             continue
 
-        txt = entry.get("summary", entry.get("title", ""))
-        # Strip HTML tags that appear in RSS summaries
-        txt = re.sub(r"<[^>]+>", " ", txt).strip()
+        txt = t.get("text", "")
 
-        # Timezone-safe date: convert to Asia/Riyadh before stripping tz
+        # Timezone-safe: X API returns UTC ISO8601 — convert to KSA (Asia/Riyadh)
         try:
-            raw_dt = pd.to_datetime(entry.get("published", ""))
-            if raw_dt.tzinfo is not None:
-                t_date = raw_dt.tz_convert("Asia/Riyadh").tz_localize(None).date()
-            else:
-                t_date = raw_dt.date()
+            raw_dt = pd.to_datetime(t.get("created_at", ""), utc=True)
+            t_date = raw_dt.tz_convert("Asia/Riyadh").date()
         except Exception:
             t_date = date.today()
 
