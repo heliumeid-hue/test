@@ -1,8 +1,6 @@
-streamlit
-pandas
-plotly
-ntscraper
-deep-translator
-gspread
-feedparser
 requests
+beautifulsoup4
+gspread
+plotly
+pandas
+streamlit
